@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prompt Studio</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- ============================================================
+       ComfyUI Assistant — 前端页面结构
+       5 页面（生成/资产/收藏/历史/设置）+ 侧边栏导航 + 状态栏
+      ============================================================ -->
+  <div class="app-shell">
+    <!-- 左侧导航栏 -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark"></div>
+        <div>
+          <div class="brand-name">Prompt Studio</div>
+          <div class="brand-sub">Local AI Console</div>
+        </div>
+      </div>
+      <nav class="side-nav">
+        <button class="nav-item active" data-page="generate">
+          <svg viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+          <span>生成</span>
+        </button>
+        <button class="nav-item" data-page="assets">
+          <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="M21 15l-5-5-9 9"/></svg>
+          <span>我的资产</span>
+        </button>
+        <button class="nav-item" data-page="library">
+          <svg viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2z"/></svg>
+          <span>收藏</span>
+        </button>
+        <button class="nav-item" data-page="history">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          <span>历史记录</span>
+        </button>
+        <button class="nav-item" data-page="settings">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>设置</span>
+        </button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="connection-line"><span class="dot"></span> ComfyUI 已连接</div>
+        <div class="foot-version">127.0.0.1:8188</div>
+      </div>
+    </aside>
+
+    <!-- 主内容区（5 个页面通过 CSS .page.active 切换） -->
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1 id="pageTitle">生成</h1>
+          <span class="page-subtitle">Z-Image Turbo 工作流</span>
+        </div>
+        <div class="topbar-right">
+          <div class="model-box">
+            <span class="model-label">当前模型</span>
+            <select id="modelSelect">
+              <option>Z-Image Turbo</option>
+              <option>Fluxed Up</option>
+            </select>
+          </div>
+          <div class="status-pill"><span class="dot"></span> 已连接</div>
+          <button class="btn-danger" id="cancelBtn" disabled>取消生成</button>
+          <button class="btn-primary" id="generateBtn">
+            <svg viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+            生成
+          </button>
+        </div>
+      </header>
+
+      <section class="page active" id="page-generate">
+        <div class="generate-grid">
+          <div class="col col-prompts">
+            <div class="card prompt-card">
+              <div class="card-head">
+                <h2>正向提示词</h2>
+                <button class="icon-btn favorite-btn" title="收藏">
+                  <svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                </button>
+              </div>
+              <textarea id="positivePrompt" spellcheck="false">1 girl, bishoujo, petite, slender, pale skin, black bob cut, blunt bangs, heterochromia, long eyelashes, elegant</textarea>
+              <div class="quick-tags">
+                <button class="chip">anime style</button>
+                <button class="chip">detailed eyes</button>
+                <button class="chip">soft lighting</button>
+                <button class="chip">full body</button>
+              </div>
+            </div>
+
+            <div class="card prompt-card">
+              <div class="card-head">
+                <h2>反向提示词</h2>
+                <button class="icon-btn favorite-btn" title="收藏">
+                  <svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                </button>
+              </div>
+              <textarea id="negativePrompt" spellcheck="false">lowres, bad anatomy, bad hands, missing fingers, extra digits, watermark, text</textarea>
+            </div>
+
+            <div class="card dictionary-card">
+              <div class="card-head">
+                <h2>提示词库</h2>
+                <span class="dict-count">206 条</span>
+              </div>
+              <div class="search-box">
+                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+                <input id="dictSearch" type="search" placeholder="搜索英文或中文">
+              </div>
+              <div class="dict-nsfw-row">
+                <select id="dictFileSelect"></select>
+                <label id="nsfwToggleWrap" hidden style="display:none"><input type="checkbox" id="nsfwToggle"> 显示 NSFW</label>
+              </div>
+              <div class="dict-cats">
+                <button class="cat active">外貌</button>
+                <button class="cat">服装</button>
+                <button class="cat">动作</button>
+                <button class="cat">背景</button>
+                <button class="cat">反向</button>
+              </div>
+              <div class="dict-list" id="dictList"></div>
+            </div>
+          </div>
+
+          <div class="col col-params">
+            <div class="card">
+              <div class="card-head"><h2>采样参数</h2><span class="badge-soft">推荐</span></div>
+              <div class="field">
+                <div class="field-label"><span>Steps</span><output id="stepsOut">8</output></div>
+                <input type="range" id="steps" min="1" max="40" value="8">
+              </div>
+              <div class="field">
+                <div class="field-label"><span>CFG</span><output id="cfgOut">1.0</output></div>
+                <input type="range" id="cfg" min="0.5" max="8" step="0.1" value="1">
+              </div>
+              <div class="grid2">
+                <label class="field-label">Sampler
+                  <select id="samplerSelect"><option>euler</option><option>dpmpp_2m</option><option>uni_pc</option></select>
+                </label>
+                <label class="field-label">Scheduler
+                  <select id="schedulerSelect"><option>simple</option><option>karras</option><option>normal</option><option>beta</option></select>
+                </label>
+              </div>
+              <div class="grid2 seed-row">
+                <label class="field-label">Seed
+                  <input id="seedInput" type="number" value="86203911">
+                </label>
+                <label class="toggle-line"><input type="checkbox" id="randomSeed" checked> 随机种子</label>
+              </div>
+              <div class="field">
+                <label class="field-label">生成数量
+                  <input id="batchCount" type="number" value="1" min="1" max="8">
+                </label>
+              </div>
+            </div>
+
+            <div class="card">
+              <details class="panel-details" open>
+                <summary>画面</summary>
+                <div class="segmented" id="ratioGroup">
+                  <button class="active">1:1</button>
+                  <button>2:3</button>
+                  <button>3:4</button>
+                  <button>16:9</button>
+                  <button>9:16</button>
+                </div>
+                <div class="grid2">
+                  <label class="field-label">宽度<input id="widthInput" type="number" value="1024"></label>
+                  <label class="field-label">高度<input id="heightInput" type="number" value="1024"></label>
+                </div>
+                <div class="type-chips" id="resolutionChips">
+                  <button class="chip" data-w="1280" data-h="720">720p</button>
+                  <button class="chip" data-w="1920" data-h="1080">1080p</button>
+                  <button class="chip" data-w="2560" data-h="1440">2K</button>
+                  <button class="chip" data-w="3840" data-h="2160">4K</button>
+                </div>
+                <div class="type-chips" id="styleChips">
+                  <button class="chip active" data-style="写实">写实</button>
+                  <button class="chip" data-style="动漫">动漫</button>
+                  <button class="chip" data-style="3D渲染">3D渲染</button>
+                  <button class="chip" data-style="插画">插画</button>
+                  <button class="chip" data-style="电影感">电影感</button>
+                  <button class="chip" data-style="赛博朋克">赛博朋克</button>
+                  <button class="chip" data-style="水墨">水墨</button>
+                  <button class="chip" data-style="像素风">像素风</button>
+                  <button class="chip" data-style="哥特">哥特</button>
+                  <button class="chip" data-style="未来主义">未来主义</button>
+                </div>
+              </details>
+            </div>
+
+            <div class="card">
+              <details open>
+                <summary>LoRA 列表 <span class="badge-soft">6</span></summary>
+                <div class="lora-list" id="loraList"></div>
+              </details>
+            </div>
+          </div>
+
+          <div class="col col-preview">
+            <div class="card result-card">
+              <div class="card-head">
+                <h2>生成结果</h2>
+                <div class="toolbar">
+                  <button class="icon-btn" title="保存"><svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg></button>
+                  <button class="icon-btn" title="复制提示词"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+                </div>
+              </div>
+              <div class="image-stage">
+                <img id="resultImage" src="assets/preview-main.png" alt="生成预览">
+                <div class="model-badge">Z-Image Turbo</div>
+              </div>
+              <div class="generate-status" id="generateStatus"></div>
+              <div class="progress-row">
+                <div class="progress"><div class="progress-bar" style="width: 68%"></div></div>
+                <span id="progressText">等待任务</span>
+              </div>
+              <div class="result-meta">
+                <span>8 steps</span><span>CFG 1.0</span><span>1024x1024</span><span>euler</span>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><h2>最近生成</h2><a class="link" href="#">查看全部</a></div>
+              <div class="thumb-row" id="recentThumbs"></div>
+            </div>
+
+            <div class="card">
+              <details open>
+                <summary>生成队列 <span class="badge-soft" id="queueCount">0</span></summary>
+                <div class="queue-list" id="queueList"></div>
+              </details>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" id="page-assets">
+        <div class="page-toolbar">
+          <div class="search-box">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <input type="search" placeholder="搜索图片、提示词、模型">
+          </div>
+          <div class="toolbar-right">
+            <select><option>全部模型</option><option>Z-Image Turbo</option><option>Fluxed Up</option></select>
+            <button class="btn-secondary">导入图片</button>
+          </div>
+        </div>
+        <div class="asset-tabs">
+          <button data-asset-tab="saved">已保存</button>
+          <button class="active" data-asset-tab="unsaved">未保存</button>
+        </div>
+        <div class="asset-grid" id="assetGrid"></div>
+      </section>
+
+      <section class="page" id="page-library">
+        <div class="fav-tabs">
+          <button class="active" data-fav-tab="prompt">提示词</button>
+          <button data-fav-tab="image">图片</button>
+        </div>
+        <div class="card-head"><h2>我的收藏</h2><span class="badge-soft" id="favCount">0 条</span></div>
+        <div class="fav-list" id="favList"></div>
+        <div class="asset-grid" id="favImageGrid" style="display:none"></div>
+      </section>
+
+      <section class="page" id="page-history">
+        <div class="page-toolbar">
+          <div class="search-box">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <input type="search" placeholder="搜索历史提示词">
+          </div>
+          <div class="toolbar-right">
+            <select><option>全部模型</option><option>Z-Image Turbo</option><option>Fluxed Up</option></select>
+            <button class="btn-secondary">清空记录</button>
+          </div>
+        </div>
+        <div class="history-list" id="historyList"></div>
+      </section>
+
+      <section class="page" id="page-settings">
+        <div class="settings-grid">
+          <div class="card">
+            <h2>ComfyUI 连接</h2>
+            <label class="field-label">服务地址<input value="http://127.0.0.1:8188"></label>
+            <label class="field-label">API Key <input placeholder="留空表示无需认证"></label>
+            <button class="btn-secondary">测试连接</button>
+          </div>
+          <div class="card">
+            <h2>文件保存</h2>
+            <label class="field-label">图片输出目录<input value="E:\AI绘图\outputs"></label>
+            <label class="field-label">工作流目录<input value="D:\liulanqi"></label>
+          </div>
+          <div class="card">
+            <h2>模型档案</h2>
+            <div class="profile-row"><span>Z-Image Turbo</span><span class="badge-soft">默认</span></div>
+            <div class="profile-row"><span>Fluxed Up</span><span class="badge-soft">已识别</span></div>
+            <button class="btn-secondary">管理模型档案</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

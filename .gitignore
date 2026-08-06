@@ -1,0 +1,25 @@
+# Local user data
+data/
+
+# Local Claude / IDE state
+.claude/
+.idea/
+.vscode/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.so
+
+# Local database and logs
+*.db
+*.db.lock
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak

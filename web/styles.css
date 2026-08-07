@@ -142,6 +142,12 @@ button { cursor: pointer; }
 .topbar-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .model-box { display: flex; align-items: center; gap: 8px; }
 .model-label { color: var(--muted); font-size: 12px; }
+.model-refresh-btn { width: 28px; height: 28px; }
+.model-refresh-btn.is-checking svg { animation: model-spin .8s linear infinite; }
+.model-check { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.model-check.ready { color: #7fe0b0; }
+.model-check.error { color: #e0a84b; }
+@keyframes model-spin { to { transform: rotate(360deg); } }
 select, input[type="text"], input[type="number"], input[type="search"] {
   background: #12161a;
   border: 1px solid var(--border);

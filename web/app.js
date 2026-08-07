@@ -764,32 +764,11 @@ function updateResultPreview() {
   }
 }
 
-// ---- ComfyUI WebSocket：实时进度条 -------------------------------------
+// ---- 生成进度 ----------------------------------------------------------
 function connectProgressWs() {
-  try {
-    const ws = new WebSocket("ws://127.0.0.1:8188/ws?clientId=prompt-studio");
-    ws.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        if (message.type === "progress") {
-          const value = message.data && message.data.value;
-          const max = message.data && message.data.max;
-          if (max > 0) {
-            const percent = Math.min(100, Math.round((value / max) * 100));
-            document.querySelector(".progress-bar").style.width = percent + "%";
-            document.getElementById("progressText").textContent = percent + "%";
-          }
-        } else if (message.type === "executing") {
-          document.getElementById("progressText").textContent = "正在生成...";
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    };
-    progressWs = ws;
-  } catch (err) {
-    console.error(err);
-  }
+  // ComfyUI 会拒绝来自助手端口的跨源 WebSocket。队列状态由同源的
+  // /api/queue 轮询提供，避免 403 和不断累积的失败连接。
+  progressWs = null;
 }
 
 // ---- 提示词库加载（含 NSFW 开关）----------------------------------------
@@ -917,6 +896,34 @@ async function loadStatus() {
   }
 }
 
+async function checkCurrentModel() {
+  const button = document.getElementById("modelRefreshBtn");
+  const result = document.getElementById("modelCheck");
+  if (!button || !result) return;
+  button.disabled = true;
+  button.classList.add("is-checking");
+  result.className = "model-check";
+  result.textContent = "检查中…";
+  try {
+    const status = await api(`/api/model_status?model=${encodeURIComponent(currentModel)}`);
+    if (status.ready) {
+      result.classList.add("ready");
+      result.textContent = "模型可用";
+    } else {
+      result.classList.add("error");
+      result.textContent = status.missing?.length
+        ? `缺少：${status.missing.join(", ")}`
+        : (status.error || "模型不可用");
+    }
+  } catch (err) {
+    result.classList.add("error");
+    result.textContent = "检查失败：ComfyUI 未连接";
+  } finally {
+    button.disabled = false;
+    button.classList.remove("is-checking");
+  }
+}
+
 // ---- 事件绑定：导航切换 --------------------------------------------------
 document.querySelectorAll(".nav-item").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -969,7 +976,9 @@ document.getElementById("modelSelect").addEventListener("change", (e) => {
   currentModel = e.target.value;
   document.querySelector(".page-subtitle").textContent = currentModel + " 工作流";
   applyModelLoras();
+  checkCurrentModel();
 });
+document.getElementById("modelRefreshBtn").addEventListener("click", checkCurrentModel);
 
 document.querySelectorAll(".favorite-btn").forEach((btn) => {
   btn.addEventListener("click", async () => {
@@ -1119,7 +1128,11 @@ async function generate() {
       const check = await api("/api/sync_check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: params.prompt, negative: params.negative }),
+        body: JSON.stringify({
+          prompt: params.prompt,
+          negative: params.negative,
+          model: params.model,
+        }),
       });
       if (check.ok) {
         synced = true;
@@ -1238,6 +1251,7 @@ decorateNumberInputs();         // 为数字输入框添加 +/- 按钮
 
 // 并行加载初始数据
 loadStatus();
+checkCurrentModel();
 loadDictionary();
 loadLoras();
 loadAssets();

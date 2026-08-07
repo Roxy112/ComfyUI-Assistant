@@ -47,6 +47,21 @@ COMFY_OUTPUT_DIR = r"E:\ComfyUI\ComfyUI_windows_portable_nvidia\ComfyUI_windows_
 db = AssistantDB(DATA_DIR)
 # 进程内文生图任务队列：键为 prompt_id，值为任务信息字典
 QUEUE = {}
+QUEUE_LOCK = threading.RLock()
+
+MODEL_REQUIREMENTS = {
+    "Z-Image Turbo": [
+        ("UnetLoaderGGUF", "unet_name", "z_image_turbo-Q4_K_M.gguf"),
+        ("CLIPLoaderGGUF", "clip_name", "Qwen3-4B-Q4_K_M.gguf"),
+        ("VAELoader", "vae_name", "ae.safetensors"),
+    ],
+    "Fluxed Up": [
+        ("UnetLoaderGGUF", "unet_name", "fluxedup-v10-q4_0.gguf"),
+        ("DualCLIPLoaderGGUF", "clip_name1", "clip_l.safetensors"),
+        ("DualCLIPLoaderGGUF", "clip_name2", "t5-v1_1-xxl-encoder-Q5_K_M.gguf"),
+        ("VAELoader", "vae_name", "ae.safetensors"),
+    ],
+}
 
 
 def get_comfyui_url():
@@ -109,6 +124,30 @@ def proxy_comfyui(path, method="GET", body=None):
     except Exception as exc:
         # 网络异常 / 超时 / 解析失败时统一包装为 502
         return 502, {"error": str(exc)}
+
+
+def get_model_status(model):
+    """检查 ComfyUI 是否已识别指定模型工作流所需的全部文件。"""
+    requirements = MODEL_REQUIREMENTS.get(model)
+    if not requirements:
+        return {"ready": False, "error": f"不支持的模型：{model}", "missing": []}
+    status, object_info = proxy_comfyui("/object_info")
+    if status != 200 or not isinstance(object_info, dict):
+        return {
+            "ready": False,
+            "error": "ComfyUI 未连接或无法读取模型列表",
+            "missing": [],
+        }
+    missing = []
+    for node_type, input_name, filename in requirements:
+        try:
+            choices = object_info[node_type]["input"]["required"][input_name][0]
+        except (KeyError, IndexError, TypeError):
+            missing.append(filename)
+            continue
+        if filename not in choices:
+            missing.append(filename)
+    return {"ready": not missing, "missing": missing, "error": ""}
 
 
 def list_workflow_files():
@@ -264,7 +303,8 @@ def apply_queue(workflow, params):
         prompt_id = result.get("prompt_id")
         if prompt_id:
             # 登记任务到内存队列，供前端实时查询状态
-            QUEUE[prompt_id] = {
+            with QUEUE_LOCK:
+                QUEUE[prompt_id] = {
                 "prompt_id": prompt_id,
                 "model": current_params.get("model", ""),
                 "prompt": current_params.get("prompt", ""),
@@ -273,7 +313,7 @@ def apply_queue(workflow, params):
                 "status": "queued",
                 "image_path": "",
                 "created_at": time.time(),
-            }
+                }
             # 启动后台守护线程，轮询确认生成结果
             threading.Thread(
                 target=watch_generation,
@@ -377,7 +417,9 @@ def refresh_queue_status():
     except Exception:
         running = set()
         pending = set()
-    for prompt_id, task in QUEUE.items():
+    with QUEUE_LOCK:
+        tasks = list(QUEUE.items())
+    for prompt_id, task in tasks:
         if task.get("status") in ("success", "cancelled", "failed", "error"):
             continue
         if prompt_id in running:
@@ -395,14 +437,25 @@ def cancel_queue_item(prompt_id):
     参数：
         prompt_id (str): 要取消的任务 ID。
     """
-    proxy_comfyui("/queue", method="POST", body={"delete": [prompt_id]})
-    proxy_comfyui("/interrupt", method="POST", body={"prompt_id": prompt_id})
-    if prompt_id in QUEUE:
-        QUEUE[prompt_id]["status"] = "cancelled"
+    status, data = proxy_comfyui("/queue")
+    if status != 200 or not isinstance(data, dict):
+        return False
+    running = {str(item[1]) for item in data.get("queue_running", []) if len(item) >= 2}
+    pending = {str(item[1]) for item in data.get("queue_pending", []) if len(item) >= 2}
+    if prompt_id in pending:
+        status, _ = proxy_comfyui("/queue", method="POST", body={"delete": [prompt_id]})
+    elif prompt_id in running:
+        status, _ = proxy_comfyui("/interrupt", method="POST")
+    else:
+        status = 200
+    if status != 200:
+        return False
+    with QUEUE_LOCK:
         QUEUE.pop(prompt_id, None)
+    return True
 
 
-def sync_and_check(prompt, negative, timeout=2.5):
+def sync_and_check(prompt, negative, timeout=2.5, require_negative=True):
     """把提示词同步到 ComfyUI 的 Prompt-Chat 插件并等待确认。
 
     先向 /api/prompt_chat/sync 提交当前提示词，然后在超时时间内
@@ -418,7 +471,7 @@ def sync_and_check(prompt, negative, timeout=2.5):
         bool: 在超时前收到匹配的回执返回 True，否则返回 False。
     """
     status, _ = proxy_comfyui(
-        "/api/prompt_chat/sync",
+        "/prompt_chat/sync",
         method="POST",
         body={"prompt": prompt, "negative": negative},
     )
@@ -427,11 +480,13 @@ def sync_and_check(prompt, negative, timeout=2.5):
     # ---- 轮询确认：循环等待 Prompt-Chat 插件返回匹配回执 ----
     deadline = time.time() + timeout
     while time.time() < deadline:
-        status, ack = proxy_comfyui("/api/prompt_chat/sync_ack")
+        status, ack = proxy_comfyui("/prompt_chat/sync_ack")
         if (
             status == 200
             and ack.get("prompt") == prompt
-            and ack.get("negative") == negative
+            and (not require_negative or ack.get("negative") == negative)
+            and ack.get("positive_applied", True)
+            and (not require_negative or ack.get("negative_applied", True))
         ):
             return True
         time.sleep(0.2)
@@ -556,6 +611,13 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if route == "/api/model_status":
+            model = query.get("model", [""])[0]
+            result = get_model_status(model)
+            result["model"] = model
+            self._send_json(result, 200 if not result.get("error") else 422)
+            return
+
         # 获取提示词词典（支持 nsfw 过滤参数）
         if route == "/api/dictionary":
             include_nsfw = query.get("nsfw", ["0"])[0] == "1"
@@ -565,7 +627,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # 代理获取 LoRA 列表
         if route == "/api/loras":
-            status, result = proxy_comfyui("/api/prompt_chat/loras")
+            status, result = proxy_comfyui("/prompt_chat/loras")
             if status == 200:
                 self._send_json(result)
             else:
@@ -596,7 +658,11 @@ class Handler(BaseHTTPRequestHandler):
         # 查询任务队列（刷新状态后按创建时间排序返回）
         if route == "/api/queue":
             refresh_queue_status()
-            tasks = sorted(QUEUE.values(), key=lambda item: item.get("created_at", 0))
+            with QUEUE_LOCK:
+                tasks = sorted(
+                    (dict(item) for item in QUEUE.values()),
+                    key=lambda item: item.get("created_at", 0),
+                )
             self._send_json({"queue": tasks})
             return
 
@@ -731,7 +797,7 @@ class Handler(BaseHTTPRequestHandler):
         # 同步提示词到 ComfyUI 的 Prompt-Chat 插件（代理请求）
         if route == "/api/sync_prompt":
             status, result = proxy_comfyui(
-                "/api/prompt_chat/sync",
+                "/prompt_chat/sync",
                 method="POST",
                 body={
                     "prompt": body.get("prompt", ""),
@@ -743,7 +809,12 @@ class Handler(BaseHTTPRequestHandler):
 
         # 同步提示词并轮询等待确认
         if route == "/api/sync_check":
-            ok = sync_and_check(body.get("prompt", ""), body.get("negative", ""))
+            model = body.get("model", "")
+            ok = sync_and_check(
+                body.get("prompt", ""),
+                body.get("negative", ""),
+                require_negative="flux" not in model.lower(),
+            )
             self._send_json({"ok": ok})
             return
 
@@ -829,8 +900,10 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/queue":
             prompt_id = query.get("prompt_id", [""])[0]
             if prompt_id:
-                cancel_queue_item(prompt_id)
-            self._send_json({"ok": True})
+                ok = cancel_queue_item(prompt_id)
+                self._send_json({"ok": ok}, 200 if ok else 502)
+            else:
+                self._send_json({"ok": False, "error": "缺少 prompt_id"}, 400)
             return
         self._send_json({"error": "not found"}, 404)
 

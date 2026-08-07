@@ -63,6 +63,10 @@
               <option>Z-Image Turbo</option>
               <option>Fluxed Up</option>
             </select>
+            <button class="icon-btn model-refresh-btn" id="modelRefreshBtn" title="检查当前模型是否可用" aria-label="检查当前模型是否可用">
+              <svg viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"/></svg>
+            </button>
+            <span class="model-check" id="modelCheck" aria-live="polite"></span>
           </div>
           <div class="status-pill"><span class="dot"></span> 已连接</div>
           <button class="btn-danger" id="cancelBtn" disabled>取消生成</button>

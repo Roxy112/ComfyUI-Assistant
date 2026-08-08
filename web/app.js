@@ -61,14 +61,52 @@ const favoritedPrompts = new Set();
 const favoritedImages = new Set();
 const favoritePromptIds = new Map();
 const favoriteImageIds = new Map();
+const favoritePromptPairIds = new Map();
 let assetPollTimer = null;
 let queueTasks = [];
 let loraNotes = {};
 let favTab = "prompt";
 let assetTab = "unsaved";
+let assetSearchQuery = "";
+let historySearchQuery = "";
+let assetModelFilter = "";
+let historyModelFilter = "";
 let progressWs = null;
 let promptSyncTimer = null;
 const syncedQueueIds = new Set();
+const modelAvailability = new Map();
+
+function promptFavoriteKey(prompt, negative) {
+  return `${prompt || ""}\u0000${negative || ""}`;
+}
+
+function currentPromptFavoriteKey() {
+  return promptFavoriteKey(
+    document.getElementById("positivePrompt").value,
+    document.getElementById("negativePrompt").value,
+  );
+}
+
+function randomSeed() {
+  const cryptoValue = globalThis.crypto?.getRandomValues
+    ? globalThis.crypto.getRandomValues(new Uint32Array(1))[0]
+    : Math.floor(Math.random() * 4294967296);
+  return cryptoValue;
+}
+
+function itemModel(item) {
+  return item?.model || parseParams(item || {}).model || "";
+}
+
+function matchesSearch(item, query) {
+  if (!query) return true;
+  const params = parseParams(item);
+  const haystack = [
+    item.path, item.image_path, item.title, item.prompt, item.negative,
+    item.model, params.prompt, params.negative, params.model,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return haystack.includes(query);
+}
 
 // ---- 通用工具：API 请求封装 ---------------------------------------------
 
@@ -154,6 +192,7 @@ function renderDict() {
           : document.getElementById("positivePrompt");
         target.value += (target.value && !target.value.endsWith(", ") ? ", " : "") + item.prompt;
         target.focus();
+        updateFavoriteButtons();
       });
       el.addEventListener("dblclick", () => {
         const target = file.target === "negative"
@@ -161,6 +200,7 @@ function renderDict() {
           : document.getElementById("positivePrompt");
         target.value += (target.value && !target.value.endsWith(", ") ? ", " : "") + item.prompt;
         target.focus();
+        updateFavoriteButtons();
       });
       list.appendChild(el);
       count += 1;
@@ -204,13 +244,20 @@ function showConfirm(title, message, onConfirm) {
 }
 
 // ---- 模态框：图片预览（带缩放/拖拽）-------------------------------------
-function showImagePreview(path) {
+function showImagePreview(path, title = "图片预览") {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   overlay.innerHTML = `
-    <div class="modal preview-modal">
+    <div class="modal preview-window" role="dialog" aria-modal="true">
+      <div class="preview-titlebar">
+        <span>${escapeHtml(title)}</span>
+        <div class="preview-title-actions">
+          <button class="icon-btn" data-action="maximize" title="最大化"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"/></svg></button>
+          <button class="icon-btn" data-action="close" title="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+        </div>
+      </div>
       <div class="preview-stage">
-        <img src="/api/file?path=${encodeURIComponent(path)}" alt="图片预览">
+        <img src="/api/file?path=${encodeURIComponent(path)}" alt="${escapeHtml(title)}">
       </div>
       <div class="preview-tools">
         <button class="btn-secondary" data-action="zoom-out">缩小</button>
@@ -218,11 +265,10 @@ function showImagePreview(path) {
         <button class="btn-secondary" data-action="reset">重置</button>
         <button class="btn-secondary" data-action="system">系统打开</button>
       </div>
-      <div class="modal-actions">
-        <button class="btn-secondary" data-action="close">关闭</button>
-      </div>
     </div>`;
+  const win = overlay.querySelector(".preview-window");
   const img = overlay.querySelector("img");
+  const titlebar = overlay.querySelector(".preview-titlebar");
   let zoom = 1;
   let tx = 0;
   let ty = 0;
@@ -231,6 +277,12 @@ function showImagePreview(path) {
   let startY = 0;
   let startTx = 0;
   let startTy = 0;
+  let movingWindow = false;
+  let windowStartX = 0;
+  let windowStartY = 0;
+  let windowLeft = 0;
+  let windowTop = 0;
+  let restoreBounds = null;
   const update = () => {
     img.style.transform = `scale(${zoom}) translate(${tx}px, ${ty}px)`;
   };
@@ -277,6 +329,44 @@ function showImagePreview(path) {
       body: JSON.stringify({ path }),
     });
   });
+  overlay.querySelector('[data-action="maximize"]').addEventListener("click", () => {
+    if (win.classList.contains("maximized")) {
+      win.classList.remove("maximized");
+      if (restoreBounds) {
+        win.style.left = restoreBounds.left;
+        win.style.top = restoreBounds.top;
+        win.style.width = restoreBounds.width;
+        win.style.height = restoreBounds.height;
+      }
+    } else {
+      const rect = win.getBoundingClientRect();
+      restoreBounds = {
+        left: `${rect.left}px`, top: `${rect.top}px`,
+        width: `${rect.width}px`, height: `${rect.height}px`,
+      };
+      win.style.transform = "none";
+      win.classList.add("maximized");
+    }
+  });
+  titlebar.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button") || win.classList.contains("maximized")) return;
+    const rect = win.getBoundingClientRect();
+    movingWindow = true;
+    windowStartX = e.clientX;
+    windowStartY = e.clientY;
+    windowLeft = rect.left;
+    windowTop = rect.top;
+    win.style.transform = "none";
+    win.style.left = `${rect.left}px`;
+    win.style.top = `${rect.top}px`;
+    titlebar.setPointerCapture(e.pointerId);
+  });
+  titlebar.addEventListener("pointermove", (e) => {
+    if (!movingWindow) return;
+    win.style.left = `${Math.max(0, windowLeft + e.clientX - windowStartX)}px`;
+    win.style.top = `${Math.max(0, windowTop + e.clientY - windowStartY)}px`;
+  });
+  titlebar.addEventListener("pointerup", () => { movingWindow = false; });
   overlay.querySelector('[data-action="close"]').addEventListener("click", () => overlay.remove());
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) overlay.remove();
@@ -376,7 +466,11 @@ function imageSrc(item) {
 function renderAssets() {
   const grid = document.getElementById("assetGrid");
   grid.innerHTML = "";
-  const data = assets.filter((asset) => assetTab === "saved" ? asset.saved : !asset.saved);
+  const data = assets.filter((asset) => {
+    const tabMatches = assetTab === "saved" ? Boolean(asset.saved) : !asset.saved;
+    const modelMatches = !assetModelFilter || itemModel(asset) === assetModelFilter;
+    return tabMatches && modelMatches && matchesSearch(asset, assetSearchQuery);
+  });
   if (!data.length) {
     grid.innerHTML = `<div class="dict-item en">${assetTab === "saved" ? "还没有已保存的图片" : "还没有未保存的图片"}</div>`;
     return;
@@ -390,8 +484,9 @@ function renderAssets() {
       <div class="asset-body">
         ${asset.saved ? `<div class="saved-badge">已保存</div>` : ""}
         <div class="asset-title">${escapeHtml(asset.title || asset.path || "未命名")}</div>
-        <div class="asset-meta">${escapeHtml(new Date((asset.created_at || Date.now()) * 1000).toLocaleString())} · ${escapeHtml(asset.model || "")}</div>
-        <div class="asset-meta">${escapeHtml(asset.prompt || "")}</div>
+        <div class="asset-meta">${escapeHtml(new Date((asset.created_at || Date.now()) * 1000).toLocaleString())}</div>
+        <div class="asset-meta asset-model">模型：${escapeHtml(asset.model || params.model || "未知")}</div>
+        <div class="asset-meta asset-prompt" title="可滚动查看完整提示词">${escapeHtml(asset.prompt || params.prompt || "")}</div>
         <div class="asset-actions">
           <button class="icon-btn" title="查看">${ICON_VIEW}</button>
           <button class="icon-btn" title="保存">${ICON_SAVE}</button>
@@ -400,8 +495,8 @@ function renderAssets() {
           <button class="icon-btn" title="删除">${ICON_TRASH}</button>
         </div>
       </div>`;
-    card.querySelector("img").addEventListener("dblclick", () => showImagePreview(asset.path));
-    card.querySelectorAll(".icon-btn")[0].addEventListener("click", () => showImagePreview(asset.path));
+    card.querySelector("img").addEventListener("dblclick", () => showImagePreview(asset.path, asset.model || params.model || "图片预览"));
+    card.querySelectorAll(".icon-btn")[0].addEventListener("click", () => showImagePreview(asset.path, asset.model || params.model || "图片预览"));
     card.querySelectorAll(".icon-btn")[1].addEventListener("click", () => {
       showConfirm("保存图片", "确认把这张图片保存到你的输出目录吗？", async () => {
         await api("/api/assets/save", {
@@ -431,6 +526,7 @@ function renderAssets() {
             type: "image",
             image_path: asset.path,
             prompt: asset.prompt,
+            negative: params.negative || "",
             model: asset.model,
             params: params,
             category: "图片",
@@ -466,8 +562,8 @@ function parseParams(item) {
 // 一键回填：将历史/收藏的参数恢复到生成页 ---------------------------------
 function applyParams(params) {
   params = params || {};
-  if (params.prompt) document.getElementById("positivePrompt").value = params.prompt;
-  if (params.negative) document.getElementById("negativePrompt").value = params.negative;
+  if (Object.hasOwn(params, "prompt")) document.getElementById("positivePrompt").value = params.prompt || "";
+  if (Object.hasOwn(params, "negative")) document.getElementById("negativePrompt").value = params.negative || "";
   if (params.steps) {
     document.getElementById("steps").value = params.steps;
     document.getElementById("stepsOut").textContent = params.steps;
@@ -479,6 +575,7 @@ function applyParams(params) {
   if (params.sampler) document.getElementById("samplerSelect").value = params.sampler;
   if (params.scheduler) document.getElementById("schedulerSelect").value = params.scheduler;
   if (params.seed != null) document.getElementById("seedInput").value = params.seed;
+  if (params.random_seed != null) document.getElementById("randomSeed").checked = Boolean(params.random_seed);
   if (params.width) document.getElementById("widthInput").value = params.width;
   if (params.height) document.getElementById("heightInput").value = params.height;
   if (params.model) {
@@ -489,7 +586,9 @@ function applyParams(params) {
     }
     document.querySelector(".page-subtitle").textContent = currentModel + " 工作流";
     applyModelLoras();
+    updateCurrentModelUi();
   }
+  updateFavoriteButtons();
   document.querySelector(".nav-item[data-page='generate']").click();
 }
 
@@ -513,6 +612,7 @@ function applyResolutionToPrompt(width, height) {
     .replace(/^,|,\s*$/g, "")
     .trim();
   promptEl.value = cleaned ? `${cleaned}, ${tag}` : tag;
+  updateFavoriteButtons();
 }
 
 function updateResolutionFromInputs() {
@@ -528,6 +628,61 @@ function updateResolutionFromInputs() {
 }
 
 // ---- 收藏视图（提示词 + 图片双标签）-------------------------------------
+function bindFavoriteNoteEditor(noteBox, item) {
+  const showNote = () => {
+    noteBox.className = "favorite-note-display";
+    noteBox.tabIndex = 0;
+    noteBox.textContent = item.note?.trim() || "无备注";
+    noteBox.title = "双击编辑备注";
+    noteBox.ondblclick = startEdit;
+    noteBox.onkeydown = (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        startEdit();
+      }
+    };
+  };
+  const startEdit = () => {
+    const input = document.createElement("input");
+    const saveButton = document.createElement("button");
+    input.className = "favorite-note-input";
+    input.value = item.note || "";
+    input.placeholder = "输入备注";
+    saveButton.className = "favorite-note-save";
+    saveButton.type = "button";
+    saveButton.title = "保存备注";
+    saveButton.textContent = "✓";
+    noteBox.className = "favorite-note-editor";
+    noteBox.replaceChildren(input, saveButton);
+    const save = async () => {
+      const note = input.value.trim();
+      saveButton.disabled = true;
+      try {
+        await api("/api/favorites/note", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: item.id, note }),
+        });
+        item.note = note;
+        showNote();
+      } catch (err) {
+        console.error(err);
+        saveButton.disabled = false;
+      }
+    };
+    saveButton.addEventListener("click", save);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        save();
+      }
+      if (event.key === "Escape") showNote();
+    });
+    input.focus();
+  };
+  showNote();
+}
+
 function renderFavorites() {
   const promptList = document.getElementById("favList");
   const imageGrid = document.getElementById("favImageGrid");
@@ -548,9 +703,8 @@ function renderFavorites() {
         el.className = "fav-item";
         el.innerHTML = `
           <div class="en">${escapeHtml(item.prompt)}</div>
-          <div class="cn">${escapeHtml(item.category || "未分类")}</div>
+          <div class="favorite-note-display" title="双击编辑备注"></div>
           <div class="fav-foot">
-            <span class="badge-soft">${escapeHtml(item.tags || "无标签")}</span>
             <div class="fav-actions">
               <button class="icon-btn" title="一键填写">${ICON_FILL}</button>
               <button class="icon-btn" title="删除">${ICON_TRASH}</button>
@@ -566,6 +720,7 @@ function renderFavorites() {
             await loadFavorites();
           });
         });
+        bindFavoriteNoteEditor(el.querySelector(".favorite-note-display"), item);
         promptList.appendChild(el);
       }
     }
@@ -582,8 +737,9 @@ function renderFavorites() {
         card.innerHTML = `
           <img src="${item.image_path ? "/api/file?path=" + encodeURIComponent(item.image_path) : "assets/thumb-1.png"}" alt="">
           <div class="asset-body">
-            <div class="asset-title">${escapeHtml(item.model || "图片收藏")}</div>
-            <div class="asset-meta">${escapeHtml(item.prompt || "")}</div>
+            <div class="asset-title">${escapeHtml(itemModel(item) || "图片收藏")}</div>
+            <div class="asset-meta asset-model">模型：${escapeHtml(itemModel(item) || "未知")}</div>
+            <div class="asset-meta asset-prompt" title="可滚动查看完整提示词">${escapeHtml(item.prompt || parseParams(item).prompt || "")}</div>
             <div class="asset-actions">
               <button class="icon-btn" title="查看">${ICON_VIEW}</button>
               <button class="icon-btn" title="一键填写">${ICON_FILL}</button>
@@ -591,10 +747,10 @@ function renderFavorites() {
             </div>
           </div>`;
         const params = parseParams(item);
-        card.querySelector("img").addEventListener("dblclick", () => item.image_path && showImagePreview(item.image_path));
-        card.querySelectorAll(".icon-btn")[0].addEventListener("click", () => item.image_path && showImagePreview(item.image_path));
+        card.querySelector("img").addEventListener("dblclick", () => item.image_path && showImagePreview(item.image_path, item.model || "图片收藏"));
+        card.querySelectorAll(".icon-btn")[0].addEventListener("click", () => item.image_path && showImagePreview(item.image_path, item.model || "图片收藏"));
         card.querySelectorAll(".icon-btn")[1].addEventListener("click", () => {
-          showConfirm("一键填写", "确认把这张图片的提示词和参数恢复到生成页吗？", () => applyParams({ ...params, prompt: item.prompt, model: item.model }));
+          showConfirm("一键填写", "确认把这张图片的提示词和参数恢复到生成页吗？", () => applyParams({ ...params, prompt: item.prompt, negative: item.negative || params.negative || "", model: item.model }));
         });
         card.querySelectorAll(".icon-btn")[2].addEventListener("click", () => {
           showConfirm("删除收藏", "确认删除这张图片收藏吗？", async () => {
@@ -612,11 +768,15 @@ function renderFavorites() {
 function renderHistory() {
   const list = document.getElementById("historyList");
   list.innerHTML = "";
-  if (!historyItems.length) {
-    list.innerHTML = `<div class="dict-item en">暂无历史记录，生成后会显示在这里</div>`;
+  const data = historyItems.filter((item) => {
+    const modelMatches = !historyModelFilter || itemModel(item) === historyModelFilter;
+    return modelMatches && matchesSearch(item, historySearchQuery);
+  });
+  if (!data.length) {
+    list.innerHTML = `<div class="dict-item en">没有符合筛选条件的历史记录</div>`;
     return;
   }
-  for (const item of historyItems) {
+  for (const item of data) {
     const params = parseParams(item);
     const el = document.createElement("div");
     el.className = "history-item";
@@ -629,30 +789,32 @@ function renderHistory() {
       <div class="history-actions">
         <div class="history-time">${escapeHtml(new Date((item.created_at || Date.now()) * 1000).toLocaleString())}</div>
         <div class="fav-actions">
+          <button class="icon-btn" title="查看">${ICON_VIEW}</button>
           <button class="icon-btn" title="一键填写">${ICON_FILL}</button>
           <button class="icon-btn" title="收藏">${ICON_STAR}</button>
           <button class="icon-btn" title="删除">${ICON_TRASH}</button>
         </div>
       </div>`;
     if (item.image_path) {
-      el.querySelector("img").addEventListener("dblclick", () => showImagePreview(item.image_path));
+      el.querySelector("img").addEventListener("dblclick", () => showImagePreview(item.image_path, item.model || "历史图片"));
+      el.querySelectorAll(".icon-btn")[0].addEventListener("click", () => showImagePreview(item.image_path, item.model || "历史图片"));
     }
     const fill = () => {
       showConfirm("一键填写", "确认把这条历史记录的提示词和参数恢复到生成页吗？", () => applyParams({ ...params, prompt: item.prompt, negative: item.negative, model: item.model }));
     };
     el.querySelector(".history-prompt").addEventListener("click", fill);
-    el.querySelectorAll(".icon-btn")[0].addEventListener("click", fill);
-    const favBtn = el.querySelectorAll(".icon-btn")[1];
-    favBtn.classList.toggle("active", favoritedPrompts.has(item.prompt));
+    el.querySelectorAll(".icon-btn")[1].addEventListener("click", fill);
+    const favBtn = el.querySelectorAll(".icon-btn")[2];
+    const favoriteKey = promptFavoriteKey(item.prompt, item.negative);
+    favBtn.classList.toggle("active", favoritePromptPairIds.has(favoriteKey));
     favBtn.addEventListener("click", async () => {
       if (favBtn.classList.contains("active")) {
-        const favoriteId = favoritePromptIds.get(item.prompt);
+        const favoriteId = favoritePromptPairIds.get(favoriteKey);
         if (favoriteId) {
           await api(`/api/favorites?id=${favoriteId}`, { method: "DELETE" });
         }
         favBtn.classList.remove("active");
-        favoritedPrompts.delete(item.prompt);
-        favoritePromptIds.delete(item.prompt);
+        favoritePromptPairIds.delete(favoriteKey);
       } else {
         await api("/api/favorites", {
           method: "POST",
@@ -671,7 +833,7 @@ function renderHistory() {
       }
       await loadFavorites();
     });
-    el.querySelectorAll(".icon-btn")[2].addEventListener("click", () => {
+    el.querySelectorAll(".icon-btn")[3].addEventListener("click", () => {
       showConfirm("删除记录", "确认删除这条历史记录吗？", async () => {
         await api(`/api/history?id=${item.id}`, { method: "DELETE" });
         await loadHistory();
@@ -712,10 +874,14 @@ function renderQueue() {
       <div class="queue-meta">
         <span>${escapeHtml(task.model || "")}</span>
         <span>${escapeHtml(new Date((task.created_at || Date.now()) * 1000).toLocaleTimeString())}</span>
-        <button class="icon-btn" title="删除任务">${ICON_TRASH}</button>
+        ${task.status === "queued" || task.status === "running"
+          ? '<button class="btn-secondary queue-cancel-btn" type="button">取消生成</button>'
+          : `<button class="icon-btn" title="删除任务">${ICON_TRASH}</button>`}
       </div>`;
-    el.querySelector(".icon-btn").addEventListener("click", () => {
-      showConfirm("删除任务", "确认从队列中删除这个任务吗？", async () => {
+    const actionButton = el.querySelector(".queue-cancel-btn, .icon-btn");
+    actionButton.addEventListener("click", () => {
+      const active = task.status === "queued" || task.status === "running";
+      showConfirm(active ? "取消生成" : "删除任务", active ? "确认取消这个生成任务吗？" : "确认从队列中删除这个任务吗？", async () => {
         await api(`/api/queue?prompt_id=${encodeURIComponent(task.prompt_id)}`, { method: "DELETE" });
         await loadQueue();
       });
@@ -751,8 +917,10 @@ function renderRecentThumbs() {
   for (const asset of recent) {
     const thumb = document.createElement("div");
     thumb.className = "thumb";
-    thumb.innerHTML = `<img src="${imageSrc(asset)}" alt=""><span>${escapeHtml(new Date((asset.created_at || Date.now()) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}</span>`;
-    thumb.querySelector("img").addEventListener("dblclick", () => showImagePreview(asset.path));
+    thumb.innerHTML = `<img src="${imageSrc(asset)}" alt=""><span>${escapeHtml(new Date((asset.created_at || Date.now()) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}</span><button class="thumb-view" type="button">查看</button>`;
+    const open = () => showImagePreview(asset.path, asset.model || parseParams(asset).model || "最近生成");
+    thumb.querySelector("img").addEventListener("dblclick", open);
+    thumb.querySelector(".thumb-view").addEventListener("click", open);
     container.appendChild(thumb);
   }
 }
@@ -761,6 +929,25 @@ function updateResultPreview() {
   const image = document.getElementById("resultImage");
   if (assets.length && assets[0].path) {
     image.src = "/api/file?path=" + encodeURIComponent(assets[0].path);
+    document.querySelector(".model-badge").textContent = assets[0].model || parseParams(assets[0]).model || currentModel;
+  }
+}
+
+function updateCurrentModelUi() {
+  const badge = document.querySelector(".model-badge");
+  if (badge) badge.textContent = currentModel;
+}
+
+function refreshModelSelectOptions(models) {
+  const select = document.getElementById("modelSelect");
+  if (!select) return;
+  for (const item of models || []) {
+    if (!item?.model) continue;
+    modelAvailability.set(item.model, Boolean(item.ready));
+    const option = Array.from(select.options).find((entry) => entry.value === item.model);
+    if (!option) continue;
+    option.dataset.ready = item.ready ? "true" : "false";
+    option.textContent = `${item.model} ${item.ready ? "● 已连接" : "○ 未连接"}`;
   }
 }
 
@@ -856,15 +1043,17 @@ async function loadFavorites() {
     favoritedImages.clear();
     favoritePromptIds.clear();
     favoriteImageIds.clear();
+    favoritePromptPairIds.clear();
     for (const item of favorites) {
       if (item.type === "image") {
         if (item.image_path) {
           favoritedImages.add(item.image_path);
           favoriteImageIds.set(item.image_path, item.id);
         }
-      } else {
-        favoritedPrompts.add(item.prompt);
-        favoritePromptIds.set(item.prompt, item.id);
+        } else {
+          favoritedPrompts.add(item.prompt);
+          favoritePromptIds.set(item.prompt, item.id);
+          favoritePromptPairIds.set(promptFavoriteKey(item.prompt, item.negative), item.id);
       }
     }
     renderFavorites();
@@ -875,25 +1064,49 @@ async function loadFavorites() {
 }
 
 function updateFavoriteButtons() {
+  const active = favoritePromptPairIds.has(currentPromptFavoriteKey());
   document.querySelectorAll(".favorite-btn").forEach((btn) => {
-    const card = btn.closest(".prompt-card");
-    const textarea = card ? card.querySelector("textarea") : null;
-    const prompt = textarea ? textarea.value : "";
-    btn.classList.toggle("active", favoritedPrompts.has(prompt));
+    btn.classList.toggle("active", active);
   });
 }
 
 async function loadStatus() {
   try {
     const status = await api("/api/status");
-    const pill = document.querySelector(".status-pill");
+    const connected = Boolean(status.connected && modelAvailability.get(currentModel) === true);
+    const label = connected ? `已连接到${currentModel}模型` : "未连接";
+    const pill = document.getElementById("connectionStatus");
     if (pill) {
-      pill.innerHTML = `<span class="dot"></span> ${status.connected ? "已连接" : "未连接"}`;
-      pill.style.color = status.connected ? "#7fe0b0" : "#e0a84b";
+      pill.innerHTML = `<span class="dot"></span><span class="status-text">${label}</span>`;
+      pill.style.color = connected ? "#7fe0b0" : "#e0a84b";
+      pill.title = label;
+      const dot = pill.querySelector(".dot");
+      if (dot) dot.style.background = connected ? "#43d18f" : "#e0a84b";
+    }
+    const sidebarStatus = document.getElementById("sidebarConnectionStatus");
+    if (sidebarStatus) {
+      sidebarStatus.innerHTML = `<span class="dot"></span> ${label}`;
+      sidebarStatus.style.color = connected ? "#7fe0b0" : "#e0a84b";
+      const dot = sidebarStatus.querySelector(".dot");
+      if (dot) dot.style.background = connected ? "#43d18f" : "#e0a84b";
     }
   } catch (err) {
     console.error(err);
   }
+}
+
+async function scanModels(autoSelect = false) {
+  const scan = await api("/api/models_status");
+  refreshModelSelectOptions(scan.models || []);
+  const readyModels = (scan.models || []).filter((item) => item.ready);
+  if (autoSelect && readyModels.length === 1 && readyModels[0].model !== currentModel) {
+    currentModel = readyModels[0].model;
+    document.getElementById("modelSelect").value = currentModel;
+    document.querySelector(".page-subtitle").textContent = currentModel + " 工作流";
+    applyModelLoras();
+  }
+  updateCurrentModelUi();
+  return scan;
 }
 
 async function checkCurrentModel() {
@@ -906,6 +1119,7 @@ async function checkCurrentModel() {
   result.textContent = "检查中…";
   try {
     const status = await api(`/api/model_status?model=${encodeURIComponent(currentModel)}`);
+    refreshModelSelectOptions([{ model: currentModel, ready: status.ready }]);
     if (status.ready) {
       result.classList.add("ready");
       result.textContent = "模型可用";
@@ -916,12 +1130,96 @@ async function checkCurrentModel() {
         : (status.error || "模型不可用");
     }
   } catch (err) {
+    refreshModelSelectOptions([{ model: currentModel, ready: false }]);
     result.classList.add("error");
     result.textContent = "检查失败：ComfyUI 未连接";
   } finally {
+    await loadStatus();
+    updateCurrentModelUi();
     button.disabled = false;
     button.classList.remove("is-checking");
   }
+}
+
+function fileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("无法读取图片文件"));
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function importSelectedImage(file) {
+  if (!file) return;
+  if (!file.type.startsWith("image/")) {
+    alert("请选择 PNG、JPG、WEBP 或 GIF 图片");
+    return;
+  }
+  if (file.size > 25 * 1024 * 1024) {
+    alert("图片不能超过 25 MB");
+    return;
+  }
+  const button = document.getElementById("importImageBtn");
+  button.disabled = true;
+  button.textContent = "导入中…";
+  try {
+    const data = await fileAsDataUrl(file);
+    await api("/api/import_image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: file.name, data }),
+    });
+    assetTab = "unsaved";
+    document.querySelectorAll("[data-asset-tab]").forEach((item) => {
+      item.classList.toggle("active", item.dataset.assetTab === assetTab);
+    });
+    await loadAssets();
+  } catch (err) {
+    alert(`导入失败：${err.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = "导入图片";
+  }
+}
+
+async function showModelManager() {
+  let scan;
+  try {
+    scan = await scanModels(false);
+  } catch (err) {
+    alert("无法扫描模型：请确认 ComfyUI 已启动");
+    return;
+  }
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  const rows = (scan.models || []).map((item) => `
+    <div class="model-manager-row">
+      <div><strong>${escapeHtml(item.model)}</strong><small>${item.ready ? "已连接、可生成" : (item.error || "未连接或缺少所需模型文件")}</small></div>
+      <div class="model-manager-actions">
+        <span class="model-state ${item.ready ? "ready" : "offline"}">${item.ready ? "● 已连接" : "○ 未连接"}</span>
+        <button class="btn-secondary use-model-btn" data-model="${escapeHtml(item.model)}" ${item.ready ? "" : "disabled"}>使用</button>
+      </div>
+    </div>`).join("");
+  overlay.innerHTML = `
+    <div class="modal model-manager-modal" role="dialog" aria-modal="true" aria-label="管理模型档案">
+      <h3>管理模型档案</h3>
+      <p>这里显示可用模型及其连接状态。选择“使用”会切换到该模型。</p>
+      <div class="model-manager-list">${rows || "<p>没有扫描到模型。</p>"}</div>
+      <div class="modal-actions"><button class="btn-secondary close-model-manager">关闭</button></div>
+    </div>`;
+  const close = () => overlay.remove();
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
+  overlay.querySelector(".close-model-manager").addEventListener("click", close);
+  overlay.querySelectorAll(".use-model-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      const select = document.getElementById("modelSelect");
+      select.value = button.dataset.model;
+      select.dispatchEvent(new Event("change"));
+      close();
+    });
+  });
+  document.body.appendChild(overlay);
 }
 
 // ---- 事件绑定：导航切换 --------------------------------------------------
@@ -945,6 +1243,31 @@ document.querySelectorAll("[data-asset-tab]").forEach((btn) => {
     renderAssets();
   });
 });
+
+document.getElementById("assetSearch").addEventListener("input", (event) => {
+  assetSearchQuery = event.target.value.trim().toLowerCase();
+  renderAssets();
+});
+document.getElementById("assetModelFilter").addEventListener("change", (event) => {
+  assetModelFilter = event.target.value;
+  renderAssets();
+});
+document.getElementById("historySearch").addEventListener("input", (event) => {
+  historySearchQuery = event.target.value.trim().toLowerCase();
+  renderHistory();
+});
+document.getElementById("historyModelFilter").addEventListener("change", (event) => {
+  historyModelFilter = event.target.value;
+  renderHistory();
+});
+document.getElementById("importImageBtn").addEventListener("click", () => {
+  document.getElementById("importImageInput").click();
+});
+document.getElementById("importImageInput").addEventListener("change", async (event) => {
+  await importSelectedImage(event.target.files?.[0]);
+  event.target.value = "";
+});
+document.getElementById("manageModelsBtn").addEventListener("click", showModelManager);
 
 document.querySelectorAll("[data-fav-tab]").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -976,32 +1299,36 @@ document.getElementById("modelSelect").addEventListener("change", (e) => {
   currentModel = e.target.value;
   document.querySelector(".page-subtitle").textContent = currentModel + " 工作流";
   applyModelLoras();
+  updateCurrentModelUi();
   checkCurrentModel();
 });
-document.getElementById("modelRefreshBtn").addEventListener("click", checkCurrentModel);
+document.getElementById("modelRefreshBtn").addEventListener("click", async () => {
+  try {
+    await scanModels(true);
+  } catch (err) {
+    console.error(err);
+  }
+  await checkCurrentModel();
+});
 
 document.querySelectorAll(".favorite-btn").forEach((btn) => {
   btn.addEventListener("click", async () => {
-    const card = btn.closest(".prompt-card");
-    const textarea = card ? card.querySelector("textarea") : null;
-    const prompt = textarea ? textarea.value : document.getElementById("positivePrompt").value;
-    if (btn.classList.contains("active")) {
-      const favoriteId = favoritePromptIds.get(prompt);
+    const prompt = document.getElementById("positivePrompt").value;
+    const negative = document.getElementById("negativePrompt").value;
+    const key = promptFavoriteKey(prompt, negative);
+    if (favoritePromptPairIds.has(key)) {
+      const favoriteId = favoritePromptPairIds.get(key);
       if (favoriteId) {
         await api(`/api/favorites?id=${favoriteId}`, { method: "DELETE" });
       }
-      btn.classList.remove("active");
-      favoritedPrompts.delete(prompt);
-      favoritePromptIds.delete(prompt);
     } else {
       await api("/api/favorites", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, negative: document.getElementById("negativePrompt").value, category: "未分类", tags: "" }),
+        body: JSON.stringify({ prompt, negative, model: currentModel, category: "未分类", tags: "" }),
       });
-      btn.classList.add("active");
     }
-    loadFavorites();
+    await loadFavorites();
   });
 });
 
@@ -1038,6 +1365,7 @@ document.querySelectorAll("#styleChips .chip").forEach((chip) => {
       .replace(/^,|,\s*$/g, "")
       .trim();
     promptEl.value = cleaned ? `${cleaned}, ${styleText}` : styleText;
+    updateFavoriteButtons();
   });
 });
 document.querySelectorAll(".quick-tags .chip").forEach((chip) => {
@@ -1052,7 +1380,12 @@ document.querySelectorAll(".quick-tags .chip").forEach((chip) => {
     const text = e.dataTransfer.getData("text/plain");
     if (text) {
       el.value += (el.value && !el.value.endsWith(", ") ? ", " : "") + text;
+      updateFavoriteButtons();
     }
+  });
+  el.addEventListener("input", () => {
+    updateFavoriteButtons();
+    syncPromptToComfyUI();
   });
 });
 
@@ -1081,6 +1414,9 @@ if (dictionaryCard) {
 
 // ---- 核心：生成按钮逻辑（含同步检查 → 提交队列 → 轮询结果）---------------
 async function generate() {
+  if (document.getElementById("randomSeed").checked) {
+    document.getElementById("seedInput").value = randomSeed();
+  }
   const loras = [];
   document.querySelectorAll(".lora-row").forEach((row) => {
     const checkbox = row.querySelector("input[type='checkbox']");
@@ -1164,24 +1500,15 @@ async function generate() {
       body: JSON.stringify(params),
     });
     if (result.ok) {
+      if (result.seeds?.length) {
+        document.getElementById("seedInput").value = result.seeds[0];
+      }
       statusEl.textContent = `已提交 ${result.prompt_ids ? result.prompt_ids.length : 1} 个任务到生成队列。`;
       progressText.textContent = "已入队，等待生成";
       bar.style.width = "60%";
       await loadQueue();
-      const before = assets.length;
-      if (assetPollTimer) {
-        clearInterval(assetPollTimer);
-      }
-      assetPollTimer = setInterval(async () => {
-        await loadAssets();
-        await loadHistory();
-        if (assets.length > before) {
-          clearInterval(assetPollTimer);
-          assetPollTimer = null;
-          statusEl.textContent = "图片已生成并保存到资产库。";
-          document.getElementById("progressText").textContent = "完成";
-        }
-      }, 5000);
+      await loadAssets();
+      await loadHistory();
     } else {
       statusEl.textContent = result.reason || result.error || "生成失败，请查看服务日志。";
       bar.style.width = "0%";
@@ -1193,6 +1520,91 @@ async function generate() {
 }
 
 document.getElementById("generateBtn").addEventListener("click", generate);
+
+document.getElementById("randomSeedBtn").addEventListener("click", () => {
+  document.getElementById("seedInput").value = randomSeed();
+});
+
+document.querySelectorAll("[data-prompt-action]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const target = document.getElementById(button.dataset.target);
+    if (!target) return;
+    if (button.dataset.promptAction === "clear") {
+      target.value = "";
+    } else {
+      try {
+        target.value = await navigator.clipboard.readText();
+      } catch {
+        alert("无法读取剪贴板，请确认应用拥有剪贴板权限。");
+        return;
+      }
+    }
+    target.focus();
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+});
+
+document.getElementById("resultViewBtn").addEventListener("click", () => {
+  if (assets.length && assets[0].path) {
+    showImagePreview(assets[0].path, assets[0].model || parseParams(assets[0]).model || "生成结果");
+  }
+});
+
+document.getElementById("viewAllRecent").addEventListener("click", () => {
+  assetTab = "unsaved";
+  document.querySelectorAll("[data-asset-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.assetTab === "unsaved");
+  });
+  renderAssets();
+  document.querySelector(".nav-item[data-page='assets']").click();
+});
+
+async function loadSettings() {
+  try {
+    const settings = await api("/api/settings");
+    document.getElementById("comfyuiUrlInput").value = settings.comfyui_url || "";
+    document.getElementById("outputDirInput").value = settings.output_dir || "";
+    document.getElementById("workflowDirInput").value = (settings.workflow_dirs || [""])[0] || "";
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+document.querySelectorAll("[data-browse-directory]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const input = document.getElementById(button.dataset.browseDirectory);
+    const result = await api("/api/select_directory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initial_dir: input.value }),
+    });
+    if (result.path) input.value = result.path;
+  });
+});
+
+document.getElementById("saveSettingsBtn").addEventListener("click", async () => {
+  await api("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      comfyui_url: document.getElementById("comfyuiUrlInput").value.trim(),
+      output_dir: document.getElementById("outputDirInput").value.trim(),
+      workflow_dirs: [document.getElementById("workflowDirInput").value.trim()].filter(Boolean),
+    }),
+  });
+  await loadStatus();
+  alert("设置已保存。");
+});
+
+document.getElementById("testConnectionBtn").addEventListener("click", async () => {
+  await api("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ comfyui_url: document.getElementById("comfyuiUrlInput").value.trim() }),
+  });
+  await loadStatus();
+  await checkCurrentModel();
+});
 
 // ---- UI 增强：数字输入框增减按钮 -----------------------------------------
 function decorateNumberInputs() {
@@ -1246,15 +1658,21 @@ if (resultImage) {
 
 // ---- 应用初始化 ----------------------------------------------------------
 setInterval(loadQueue, 3000);   // 每3秒轮询队列状态
+setInterval(async () => {
+  await loadAssets();
+  await loadHistory();
+}, 4000);
 connectProgressWs();            // WebSocket 接收实时生成进度
 decorateNumberInputs();         // 为数字输入框添加 +/- 按钮
 
 // 并行加载初始数据
 loadStatus();
-checkCurrentModel();
+scanModels(true).then(checkCurrentModel).catch(checkCurrentModel);
 loadDictionary();
 loadLoras();
 loadAssets();
 loadHistory();
 loadFavorites();
 loadQueue();
+loadSettings();
+updateCurrentModelUi();

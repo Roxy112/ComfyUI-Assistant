@@ -28,6 +28,7 @@ import json  # 用于将参数对象序列化为 JSON 字符串存入数据库
 import os    # 用于拼接数据库文件路径、创建目录
 import sqlite3  # SQLite 数据库驱动
 import time  # 用于生成时间戳（created_at 字段）
+from contextlib import contextmanager
 
 
 class AssistantDB:
@@ -65,6 +66,7 @@ class AssistantDB:
         # 初始化表结构
         self.init()
 
+    @contextmanager
     def connect(self):
         """
         建立一个新的数据库连接。
@@ -82,7 +84,14 @@ class AssistantDB:
         conn = sqlite3.connect(self.path)
         # 将行工厂设为 Row，允许通过列名（而非数字下标）读取字段
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def init(self):
         """
@@ -112,6 +121,7 @@ class AssistantDB:
                 negative TEXT DEFAULT '',              -- 反向提示词
                 category TEXT DEFAULT '',              -- 分类
                 tags TEXT DEFAULT '',                  -- 标签
+                note TEXT DEFAULT '',                  -- 用户备注
                 type TEXT DEFAULT 'prompt',            -- 类型（如 prompt / workflow 等）
                 image_path TEXT DEFAULT '',            -- 关联的示例图片路径
                 model TEXT DEFAULT '',                 -- 关联的模型名称
@@ -140,6 +150,13 @@ class AssistantDB:
                 saved INTEGER DEFAULT 0,               -- 是否已保存（1/0）
                 created_at REAL                        -- 生成时间戳
             );
+            -- 生成任务表：在提交时保存参数快照，进程重启后仍可正确归档图片。
+            CREATE TABLE IF NOT EXISTS generation_tasks (
+                prompt_id TEXT PRIMARY KEY,
+                params_json TEXT DEFAULT '{}',
+                workflow_path TEXT DEFAULT '',
+                created_at REAL
+            );
             -- 工作流表：保存用户保存的工作流模板
             CREATE TABLE IF NOT EXISTS workflows (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,6 +182,7 @@ class AssistantDB:
                 "image_path": "TEXT DEFAULT ''",       # 图片路径字段
                 "model": "TEXT DEFAULT ''",            # 模型字段
                 "params_json": "TEXT DEFAULT '{}'",    # 参数 JSON 字段
+                "note": "TEXT DEFAULT ''",             # 用户备注字段
             })
             # 兼容旧版 assets 表：补上 saved 字段
             self._ensure_columns(conn, "assets", {"saved": "INTEGER DEFAULT 0"})
@@ -244,6 +262,7 @@ class AssistantDB:
         image_path="",
         model="",
         params=None,
+        note="",
     ):
         """
         新增一条收藏记录。
@@ -266,15 +285,30 @@ class AssistantDB:
             以原文（而非 \\uXXXX 转义）形式存入 JSON 字符串，便于阅读。
         """
         with self.connect() as conn:
+            # 前端状态可能因为回填或异步刷新而短暂过期，数据库层仍应保证
+            # 相同的提示词组合或同一张图片不会被重复收藏。
+            if ftype == "image" and image_path:
+                existing = conn.execute(
+                    "SELECT id FROM favorites WHERE type='image' AND image_path=? ORDER BY id DESC LIMIT 1",
+                    (image_path,),
+                ).fetchone()
+            else:
+                existing = conn.execute(
+                    "SELECT id FROM favorites WHERE type=? AND prompt=? AND negative=? ORDER BY id DESC LIMIT 1",
+                    (ftype, prompt, negative),
+                ).fetchone()
+            if existing:
+                return existing["id"]
             # 插入一条收藏，created_at 使用当前时间戳
             cur = conn.execute(
-                "INSERT INTO favorites(prompt,negative,category,tags,type,image_path,model,params_json,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO favorites(prompt,negative,category,tags,note,type,image_path,model,params_json,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     prompt,
                     negative,
                     category,
                     tags,
+                    note,
                     ftype,
                     image_path,
                     model,
@@ -325,6 +359,11 @@ class AssistantDB:
             # 按主键精确删除
             conn.execute("DELETE FROM favorites WHERE id=?", (favorite_id,))
 
+    def set_favorite_note(self, favorite_id, note):
+        """更新指定收藏的备注。"""
+        with self.connect() as conn:
+            conn.execute("UPDATE favorites SET note=? WHERE id=?", (note, favorite_id))
+
     def add_history(self, prompt, negative, model, params, workflow="", image_path=""):
         """
         新增一条生成历史记录。
@@ -341,6 +380,14 @@ class AssistantDB:
             int: 新记录的自增主键 id。
         """
         with self.connect() as conn:
+            # 重试轮询或进程恢复时，同一输出图片不应重复出现在历史中。
+            if image_path:
+                existing = conn.execute(
+                    "SELECT id FROM history WHERE image_path=? ORDER BY id DESC LIMIT 1",
+                    (image_path,),
+                ).fetchone()
+                if existing:
+                    return existing["id"]
             # 插入历史记录，created_at 用当前时间戳
             cur = conn.execute(
                 "INSERT INTO history(prompt,negative,model,params_json,workflow,image_path,created_at) "
@@ -349,6 +396,30 @@ class AssistantDB:
                  workflow, image_path, time.time()),
             )
             return cur.lastrowid
+
+    def save_generation_task(self, prompt_id, params, workflow_path):
+        """保存或更新已提交给 ComfyUI 的任务参数快照。"""
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO generation_tasks(prompt_id,params_json,workflow_path,created_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(prompt_id) DO UPDATE SET params_json=excluded.params_json, workflow_path=excluded.workflow_path",
+                (prompt_id, json.dumps(params or {}, ensure_ascii=False), workflow_path, time.time()),
+            )
+
+    def get_generation_task(self, prompt_id):
+        """读取任务快照；找不到时返回空字典。"""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT params_json,workflow_path,created_at FROM generation_tasks WHERE prompt_id=?",
+                (prompt_id,),
+            ).fetchone()
+        if not row:
+            return {}
+        try:
+            params = json.loads(row["params_json"] or "{}")
+        except Exception:
+            params = {}
+        return {"params": params, "workflow_path": row["workflow_path"] or "", "created_at": row["created_at"]}
 
     def list_history(self, limit=200):
         """
@@ -412,6 +483,14 @@ class AssistantDB:
             `1 if saved else 0` 将传入值归一化为 0/1，保证字段取值规范。
         """
         with self.connect() as conn:
+            # ComfyUI 输出路径可作为幂等键，避免多个监视器或重试重复写入资产。
+            if path:
+                existing = conn.execute(
+                    "SELECT id FROM assets WHERE path=? ORDER BY id DESC LIMIT 1",
+                    (path,),
+                ).fetchone()
+                if existing:
+                    return existing["id"]
             # 插入素材记录
             cur = conn.execute(
                 "INSERT INTO assets(path,thumb,prompt,model,params_json,saved,created_at) "

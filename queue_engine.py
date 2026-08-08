@@ -259,6 +259,31 @@ def apply_zimage(template, params, loras):
     _, sampler = samplers[0]
     inputs = sampler["inputs"]  # 采样器输入字典（后续多处直接修改）
 
+    # 主 Z-Image 工作流通过标题为 “(used for reroute)” 的 StringTrim
+    # 将用户提示词送入样式整合链；KSamplerAdvanced 属于旁路兼容分支。
+    for _, node in _find_nodes(template, class_type="StringTrim", title_part="used for reroute"):
+        if "string" in node.get("inputs", {}):
+            node["inputs"]["string"] = params.get("prompt", "")
+
+    # 同时更新直接保存文本的兼容分支，确保切换到该分支时参数仍一致。
+    for _, node in _find_nodes(template, class_type="CLIPTextEncode"):
+        text = node.get("inputs", {}).get("text")
+        if not isinstance(text, str):
+            continue
+        title = node.get("_meta", {}).get("title", "").lower()
+        node["inputs"]["text"] = params.get("negative", "") if "negative" in title else params.get("prompt", "")
+
+    # 主工作流的种子和尺寸由 PrimitiveInt 节点驱动，而不是旁路采样器。
+    for _, node in _find_nodes(template, class_type="PrimitiveInt", title_part="SEED"):
+        node.get("inputs", {})["value"] = int(params.get("seed", 0))
+    width, height = params.get("width"), params.get("height")
+    if width is not None and height is not None:
+        short_side, long_side = sorted((int(width), int(height)))
+        for _, node in _find_nodes(template, class_type="PrimitiveInt", title_part="Default Short Side"):
+            node.get("inputs", {})["value"] = short_side
+        for _, node in _find_nodes(template, class_type="PrimitiveInt", title_part="Default Long Side"):
+            node.get("inputs", {})["value"] = long_side
+
     # 注入提示词（正/反向）、种子与分辨率
     _set_prompt_text(template, inputs, params.get("prompt", ""), params.get("negative", ""))
     _set_seed(template, inputs, params.get("seed", 0))
@@ -343,7 +368,7 @@ def apply_flux(template, params, loras):
         sampler_nodes[0][1]["inputs"]["sampler_name"] = params["sampler"]
 
     # Resolution（分辨率）：处理空潜图与 Flux 采样节点
-    for cls in ("EmptyLatentImage", "ModelSamplingFlux"):
+    for cls in ("EmptyLatentImage", "EmptySD3LatentImage", "ModelSamplingFlux"):
         nodes = _find_nodes(template, class_type=cls)
         if nodes:
             inp = nodes[0][1]["inputs"]
@@ -357,12 +382,16 @@ def apply_flux(template, params, loras):
     clip_encode = _find_nodes(template, class_type="CLIPTextEncode")
     if clip_encode:
         # 文本输入是引用（指向另一个文本节点），形如 ["id", 0]
-        text_ref = clip_encode[0][1].get("inputs", {}).get("text")
+        text_inputs = clip_encode[0][1].get("inputs", {})
+        text_ref = text_inputs.get("text")
         if isinstance(text_ref, list) and text_ref[0] in template:
             text_node = template[text_ref[0]]
             # 目标节点以 value 字段保存文本 → 覆盖之
             if "value" in text_node.get("inputs", {}):
                 text_node["inputs"]["value"] = params.get("prompt", "")
+        elif isinstance(text_ref, str):
+            # 官方 Flux 工作流把文本直接保存在 CLIPTextEncode.text 中。
+            text_inputs["text"] = params.get("prompt", "")
 
     # LoRA injection（LoRA 注入，与 Z-Image 共用链式逻辑）
     # 找到模型来源（UnetLoaderGGUF）与 CLIP 来源（DualCLIPLoaderGGUF）节点

@@ -18,6 +18,7 @@ ComfyUI 助手主程序（后端 HTTP 服务）。
 import json
 import os
 import random
+import base64
 import shutil
 import sys
 import threading
@@ -40,6 +41,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")        # 数据存储根目录
 GENERATED_DIR = os.path.join(DATA_DIR, "generated")  # 生成的临时工作流文件
 WORKFLOW_DIR = os.path.join(DATA_DIR, "workflows")   # 上传保存的工作流目录
 IMPORT_DIR = os.path.join(DATA_DIR, "imports")       # 导入的 md 词典文件目录
+ASSET_IMPORT_DIR = os.path.join(DATA_DIR, "imported_assets")
 # ComfyUI 输出图片的绝对路径（本地固定路径）
 COMFY_OUTPUT_DIR = r"E:\ComfyUI\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\ComfyUI\output"
 
@@ -128,9 +130,6 @@ def proxy_comfyui(path, method="GET", body=None):
 
 def get_model_status(model):
     """检查 ComfyUI 是否已识别指定模型工作流所需的全部文件。"""
-    requirements = MODEL_REQUIREMENTS.get(model)
-    if not requirements:
-        return {"ready": False, "error": f"不支持的模型：{model}", "missing": []}
     status, object_info = proxy_comfyui("/object_info")
     if status != 200 or not isinstance(object_info, dict):
         return {
@@ -138,6 +137,14 @@ def get_model_status(model):
             "error": "ComfyUI 未连接或无法读取模型列表",
             "missing": [],
         }
+    return _model_status_from_object_info(model, object_info)
+
+
+def _model_status_from_object_info(model, object_info):
+    """基于一次 /object_info 响应计算指定模型的可用性。"""
+    requirements = MODEL_REQUIREMENTS.get(model)
+    if not requirements:
+        return {"ready": False, "error": f"不支持的模型：{model}", "missing": []}
     missing = []
     for node_type, input_name, filename in requirements:
         try:
@@ -148,6 +155,84 @@ def get_model_status(model):
         if filename not in choices:
             missing.append(filename)
     return {"ready": not missing, "missing": missing, "error": ""}
+
+
+def get_all_model_statuses():
+    """一次扫描全部已支持模型，避免前端为每个模型重复请求 ComfyUI。"""
+    status, object_info = proxy_comfyui("/object_info")
+    if status != 200 or not isinstance(object_info, dict):
+        error = "ComfyUI 未连接或无法读取模型列表"
+        return {
+            "connected": False,
+            "models": [
+                {"model": model, "ready": False, "missing": [], "error": error}
+                for model in MODEL_REQUIREMENTS
+            ],
+        }
+    return {
+        "connected": True,
+        "models": [
+            {"model": model, **_model_status_from_object_info(model, object_info)}
+            for model in MODEL_REQUIREMENTS
+        ],
+    }
+
+
+def choose_directory(initial_dir=""):
+    """打开 Windows 原生目录选择器，取消时返回空字符串。"""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = filedialog.askdirectory(
+            initialdir=initial_dir if os.path.isdir(initial_dir) else BASE_DIR,
+            title="选择目录",
+            mustexist=False,
+        )
+        root.destroy()
+        return selected or ""
+    except Exception:
+        return ""
+
+
+def import_asset_image(filename, data_url):
+    """将前端选择的图片写入应用素材目录，并创建一条未保存资产记录。"""
+    if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+        raise ValueError("请选择受支持的图片文件")
+    try:
+        header, encoded = data_url.split(",", 1)
+        mime_type = header.split(";", 1)[0].split(":", 1)[1].lower()
+        extension = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/webp": ".webp",
+            "image/gif": ".gif",
+        }.get(mime_type)
+        raw = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise ValueError("图片数据无效") from exc
+    if not extension:
+        raise ValueError("仅支持 PNG、JPG、WebP 和 GIF 图片")
+    if len(raw) > 25 * 1024 * 1024:
+        raise ValueError("图片不能超过 25MB")
+    os.makedirs(ASSET_IMPORT_DIR, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(filename or "image"))[0] or "image"
+    safe_stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)[:80]
+    path = os.path.join(ASSET_IMPORT_DIR, f"{safe_stem}_{time.time_ns()}{extension}")
+    with open(path, "wb") as f:
+        f.write(raw)
+    asset_id = db.add_asset(
+        path,
+        path,
+        "",
+        "导入图片",
+        {"imported": True, "original_filename": os.path.basename(filename or "")},
+        saved=0,
+    )
+    return {"id": asset_id, "path": path}
 
 
 def list_workflow_files():
@@ -236,18 +321,23 @@ def apply_queue(workflow, params):
         失败时 {"ok": False, "error": ...}，若已生成临时文件还会附带 saved_path。
     """
     os.makedirs(GENERATED_DIR, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    # 同一秒内可连续提交多个请求；加入纳秒与随机尾缀，避免临时工作流互相覆盖。
+    request_token = f"{time.time_ns()}_{random.randint(0, 999999):06d}"
     batch_count = max(1, int(params.get("batch_count", 1) or 1))
     random_seed = bool(params.get("random_seed", False))
     base_seed = int(params.get("seed", 0) or 0)
     prompt_ids = []
+    seeds = []
 
     # ---- 批量循环：逐张图片构建提示词并提交 ----
     for index in range(batch_count):
         # 是否随机种子：开启则每次随机，否则沿用用户指定种子
-        seed = random.randint(0, 4294967295) if random_seed else base_seed
+        # 前端会在每次随机提交前写入第一个 seed，保证界面显示值与首张图一致；
+        # 同一批的后续图片则继续使用不同随机 seed。
+        seed = (base_seed if index == 0 else random.randint(0, 4294967295)) if random_seed else base_seed
         current_params = dict(params or {})
         current_params["seed"] = seed
+        seeds.append(seed)
         try:
             prompt = queue_engine.apply_template(
                 current_params.get("model", "Z-Image Turbo"),
@@ -261,7 +351,7 @@ def apply_queue(workflow, params):
                 "error": f"无法构建模型模板：{exc}",
             }
 
-        saved_path = os.path.join(GENERATED_DIR, f"workflow_{timestamp}_{index}.json")
+        saved_path = os.path.join(GENERATED_DIR, f"workflow_{request_token}_{index}.json")
         with open(saved_path, "w", encoding="utf-8") as f:
             json.dump(prompt, f, ensure_ascii=False, indent=2)
 
@@ -302,12 +392,14 @@ def apply_queue(workflow, params):
             }
         prompt_id = result.get("prompt_id")
         if prompt_id:
+            db.save_generation_task(prompt_id, current_params, saved_path)
             # 登记任务到内存队列，供前端实时查询状态
             with QUEUE_LOCK:
                 QUEUE[prompt_id] = {
                 "prompt_id": prompt_id,
                 "model": current_params.get("model", ""),
                 "prompt": current_params.get("prompt", ""),
+                "negative": current_params.get("negative", ""),
                 "params": current_params,
                 "saved_path": saved_path,
                 "status": "queued",
@@ -325,6 +417,7 @@ def apply_queue(workflow, params):
     return {
         "ok": True,
         "prompt_ids": prompt_ids,
+        "seeds": seeds,
         "queue_size": len(QUEUE),
     }
 
@@ -341,11 +434,19 @@ def watch_generation(prompt_id, params, workflow_path):
         params (dict): 生成参数（用于记录素材/历史的元信息）。
         workflow_path (str): 对应临时工作流文件的保存路径。
     """
+    # 进程重启后的恢复任务会以空参数进入；优先从提交时持久化的快照还原。
+    if not params:
+        saved_task = db.get_generation_task(prompt_id)
+        params = saved_task.get("params", {})
+        workflow_path = workflow_path or saved_task.get("workflow_path", "")
     url = get_comfyui_url() + f"/history/{prompt_id}"
     # ---- 轮询确认：循环等待 ComfyUI 完成生成 ----
     for _ in range(180):
         time.sleep(2)
         try:
+            with QUEUE_LOCK:
+                if QUEUE.get(prompt_id, {}).get("status") == "cancelled":
+                    return
             with urllib.request.urlopen(url, timeout=5) as resp:
                 history = json.loads(resp.read().decode("utf-8"))
             item = history.get(prompt_id)
@@ -361,7 +462,9 @@ def watch_generation(prompt_id, params, workflow_path):
             if status_str != "success":
                 # 仍在排队/执行中，继续下一轮
                 continue
-            # 生成成功：遍历输出节点收集图片文件
+            # 生成成功：遍历输出节点收集图片文件。ComfyUI 可能先返回 success，
+            # 随后才让文件在磁盘上可见；未发现任何图片时继续轮询，而非提前结束。
+            found_images = 0
             for output in item.get("outputs", {}).values():
                 for image in output.get("images", []):
                     full_path = os.path.join(
@@ -371,6 +474,7 @@ def watch_generation(prompt_id, params, workflow_path):
                     )
                     # 确认图片实际存在后写入素材库与历史记录
                     if os.path.isfile(full_path):
+                        found_images += 1
                         params = params or {}
                         db.add_asset(
                             full_path,
@@ -387,12 +491,11 @@ def watch_generation(prompt_id, params, workflow_path):
                             workflow_path,
                             full_path,
                         )
-                        if prompt_id in QUEUE:
-                            QUEUE[prompt_id].update(status="success", image_path=full_path)
-            # 兜底：即使没找到图片也标记为成功，避免任务一直悬挂
-            if prompt_id in QUEUE and QUEUE[prompt_id].get("status") != "success":
-                QUEUE[prompt_id]["status"] = "success"
-            return
+                        with QUEUE_LOCK:
+                            if prompt_id in QUEUE:
+                                QUEUE[prompt_id].update(status="success", image_path=full_path)
+            if found_images:
+                return
         except Exception:
             # 单次查询异常时忽略，继续下一轮重试
             continue
@@ -437,6 +540,11 @@ def cancel_queue_item(prompt_id):
     参数：
         prompt_id (str): 要取消的任务 ID。
     """
+    with QUEUE_LOCK:
+        existing = QUEUE.get(prompt_id)
+        if existing and existing.get("status") in ("success", "cancelled", "failed", "error"):
+            QUEUE.pop(prompt_id, None)
+            return True
     status, data = proxy_comfyui("/queue")
     if status != 200 or not isinstance(data, dict):
         return False
@@ -451,7 +559,8 @@ def cancel_queue_item(prompt_id):
     if status != 200:
         return False
     with QUEUE_LOCK:
-        QUEUE.pop(prompt_id, None)
+        if prompt_id in QUEUE:
+            QUEUE[prompt_id]["status"] = "cancelled"
     return True
 
 
@@ -618,6 +727,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(result, 200 if not result.get("error") else 422)
             return
 
+        if route == "/api/models_status":
+            self._send_json(get_all_model_statuses())
+            return
+
         # 获取提示词词典（支持 nsfw 过滤参数）
         if route == "/api/dictionary":
             include_nsfw = query.get("nsfw", ["0"])[0] == "1"
@@ -722,6 +835,15 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # 添加收藏
+        if route == "/api/favorites/note":
+            favorite_id = body.get("id")
+            if not favorite_id:
+                self._send_json({"ok": False, "error": "缺少收藏 id"}, 400)
+                return
+            db.set_favorite_note(int(favorite_id), body.get("note", ""))
+            self._send_json({"ok": True})
+            return
+
         if route == "/api/favorites":
             favorite_id = db.add_favorite(
                 body.get("prompt", ""),
@@ -732,8 +854,22 @@ class Handler(BaseHTTPRequestHandler):
                 body.get("image_path", ""),
                 body.get("model", ""),
                 body.get("params", {}),
+                body.get("note", ""),
             )
             self._send_json({"ok": True, "id": favorite_id})
+            return
+
+        if route == "/api/select_directory":
+            selected = choose_directory(body.get("initial_dir", ""))
+            self._send_json({"ok": True, "path": selected})
+            return
+
+        if route == "/api/import_image":
+            try:
+                result = import_asset_image(body.get("filename", ""), body.get("data", ""))
+                self._send_json({"ok": True, **result})
+            except ValueError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 422)
             return
 
         # 保存素材到输出目录
@@ -925,39 +1061,45 @@ def restore_queue_from_comfyui():
             for item in running_items:
                 if len(item) >= 2:
                     pid = str(item[1])
+                    saved_task = db.get_generation_task(pid)
+                    task_params = saved_task.get("params", {})
                     QUEUE[pid] = {
                         "prompt_id": pid,
-                        "model": "",
-                        "prompt": "",
-                        "params": {},
-                        "saved_path": "",
+                        "model": task_params.get("model", ""),
+                        "prompt": task_params.get("prompt", ""),
+                        "negative": task_params.get("negative", ""),
+                        "params": task_params,
+                        "saved_path": saved_task.get("workflow_path", ""),
                         "status": "running",
                         "image_path": "",
-                        "created_at": time.time(),
+                        "created_at": saved_task.get("created_at") or time.time(),
                     }
                     # 启动后台线程继续监视
                     threading.Thread(
                         target=watch_generation,
-                        args=(pid, {}, ""),
+                        args=(pid, task_params, saved_task.get("workflow_path", "")),
                         daemon=True,
                     ).start()
             for item in pending_items:
                 if len(item) >= 2:
                     pid = str(item[1])
+                    saved_task = db.get_generation_task(pid)
+                    task_params = saved_task.get("params", {})
                     QUEUE[pid] = {
                         "prompt_id": pid,
-                        "model": "",
-                        "prompt": "",
-                        "params": {},
-                        "saved_path": "",
+                        "model": task_params.get("model", ""),
+                        "prompt": task_params.get("prompt", ""),
+                        "negative": task_params.get("negative", ""),
+                        "params": task_params,
+                        "saved_path": saved_task.get("workflow_path", ""),
                         "status": "queued",
                         "image_path": "",
-                        "created_at": time.time(),
+                        "created_at": saved_task.get("created_at") or time.time(),
                     }
                     # 启动后台线程继续监视
                     threading.Thread(
                         target=watch_generation,
-                        args=(pid, {}, ""),
+                        args=(pid, task_params, saved_task.get("workflow_path", "")),
                         daemon=True,
                     ).start()
     except Exception:

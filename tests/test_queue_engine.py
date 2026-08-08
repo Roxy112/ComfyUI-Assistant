@@ -199,6 +199,38 @@ class TestFluxLoRAInjection(unittest.TestCase):
                 self.assertEqual(model_ref[0], self.unet_id,
                                  "无 LoRA 时 ModelSamplingFlux.model 应保持指向原始 UnetLoaderGGUF")
 
+    def test_flux_template_model_contract(self):
+        """FluxedUp 模板必须继续引用已部署的 GGUF、编码器和 VAE。"""
+        expected = {
+            "UnetLoaderGGUF": ("unet_name", "fluxedup-v10-q4_0.gguf"),
+            "VAELoader": ("vae_name", "ae.safetensors"),
+        }
+        for class_type, (key, value) in expected.items():
+            nodes = queue_engine._find_nodes(self._original, class_type=class_type)
+            self.assertTrue(nodes, f"模板缺少 {class_type}")
+            self.assertEqual(nodes[0][1]["inputs"].get(key), value)
+
+        clip_nodes = queue_engine._find_nodes(self._original, class_type="DualCLIPLoaderGGUF")
+        self.assertTrue(clip_nodes, "模板缺少 DualCLIPLoaderGGUF")
+        clip_inputs = clip_nodes[0][1]["inputs"]
+        self.assertEqual(clip_inputs.get("clip_name1"), "clip_l.safetensors")
+        self.assertEqual(clip_inputs.get("clip_name2"), "t5-v1_1-xxl-encoder-Q5_K_M.gguf")
+
+    def test_official_flux_shape_is_supported(self):
+        """适配官方 Flux 工作流的直连文本与 EmptySD3LatentImage。"""
+        template = {
+            "1": {"class_type": "CLIPTextEncode", "inputs": {"text": "old"}},
+            "2": {"class_type": "EmptySD3LatentImage", "inputs": {"width": 1024, "height": 1024}},
+        }
+        queue_engine.apply_flux(
+            template,
+            {"prompt": "new prompt", "width": 768, "height": 1152},
+            [],
+        )
+        self.assertEqual(template["1"]["inputs"]["text"], "new prompt")
+        self.assertEqual(template["2"]["inputs"]["width"], 768)
+        self.assertEqual(template["2"]["inputs"]["height"], 1152)
+
 
 class TestZImageLoRAInjection(unittest.TestCase):
     """测试 Z-Image 模板的 LoRA 内联注入。"""
@@ -236,6 +268,33 @@ class TestZImageLoRAInjection(unittest.TestCase):
 
             # lora_2 的 strengthTwo 应回退到 strength
             self.assertEqual(inputs["lora_2"]["strengthTwo"], 0.9)
+
+    def test_main_workflow_prompt_seed_and_size_are_updated(self):
+        """参数必须进入实际连接到输出的主工作流，而非仅旁路兼容分支。"""
+        template = self._fresh_template()
+        queue_engine.apply_zimage(
+            template,
+            {
+                "prompt": "assistant contract prompt",
+                "negative": "assistant negative",
+                "seed": 13579,
+                "width": 512,
+                "height": 768,
+            },
+            [],
+        )
+        prompt_nodes = queue_engine._find_nodes(template, class_type="StringTrim", title_part="used for reroute")
+        self.assertTrue(prompt_nodes)
+        self.assertEqual(prompt_nodes[0][1]["inputs"]["string"], "assistant contract prompt")
+
+        seed_nodes = queue_engine._find_nodes(template, class_type="PrimitiveInt", title_part="SEED")
+        self.assertTrue(seed_nodes)
+        self.assertEqual(seed_nodes[0][1]["inputs"]["value"], 13579)
+
+        short_nodes = queue_engine._find_nodes(template, class_type="PrimitiveInt", title_part="Default Short Side")
+        long_nodes = queue_engine._find_nodes(template, class_type="PrimitiveInt", title_part="Default Long Side")
+        self.assertEqual(short_nodes[0][1]["inputs"]["value"], 512)
+        self.assertEqual(long_nodes[0][1]["inputs"]["value"], 768)
 
     def test_zero_loras_clears_old_fields(self):
         """不传入 LoRA 时应清除旧的 lora_ 字段。"""

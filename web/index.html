@@ -44,7 +44,7 @@
         </button>
       </nav>
       <div class="sidebar-foot">
-        <div class="connection-line"><span class="dot"></span> ComfyUI 已连接</div>
+        <div class="connection-line" id="sidebarConnectionStatus"><span class="dot"></span> ComfyUI 已连接</div>
         <div class="foot-version">127.0.0.1:8188</div>
       </div>
     </aside>
@@ -60,15 +60,15 @@
           <div class="model-box">
             <span class="model-label">当前模型</span>
             <select id="modelSelect">
-              <option>Z-Image Turbo</option>
-              <option>Fluxed Up</option>
+              <option value="Z-Image Turbo">Z-Image Turbo</option>
+              <option value="Fluxed Up">Fluxed Up</option>
             </select>
             <button class="icon-btn model-refresh-btn" id="modelRefreshBtn" title="检查当前模型是否可用" aria-label="检查当前模型是否可用">
               <svg viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"/></svg>
             </button>
             <span class="model-check" id="modelCheck" aria-live="polite"></span>
           </div>
-          <div class="status-pill"><span class="dot"></span> 已连接</div>
+          <div class="status-pill" id="connectionStatus" title="当前未连接模型"><span class="dot"></span><span class="status-text">已连接</span></div>
           <button class="btn-danger" id="cancelBtn" disabled>取消生成</button>
           <button class="btn-primary" id="generateBtn">
             <svg viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg>
@@ -83,25 +83,25 @@
             <div class="card prompt-card">
               <div class="card-head">
                 <h2>正向提示词</h2>
-                <button class="icon-btn favorite-btn" title="收藏">
-                  <svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                </button>
+                <div class="prompt-tools">
+                  <button class="icon-btn favorite-btn" title="收藏当前正反向提示词组合">
+                    <svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                  </button>
+                  <button class="icon-btn" type="button" data-prompt-action="paste" data-target="positivePrompt" title="粘贴提示词"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+                  <button class="icon-btn" type="button" data-prompt-action="clear" data-target="positivePrompt" title="清空提示词"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></button>
+                </div>
               </div>
               <textarea id="positivePrompt" spellcheck="false">1 girl, bishoujo, petite, slender, pale skin, black bob cut, blunt bangs, heterochromia, long eyelashes, elegant</textarea>
-              <div class="quick-tags">
-                <button class="chip">anime style</button>
-                <button class="chip">detailed eyes</button>
-                <button class="chip">soft lighting</button>
-                <button class="chip">full body</button>
-              </div>
             </div>
 
             <div class="card prompt-card">
               <div class="card-head">
                 <h2>反向提示词</h2>
-                <button class="icon-btn favorite-btn" title="收藏">
-                  <svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                </button>
+                <div class="prompt-tools">
+                  <button class="icon-btn favorite-btn" title="收藏当前正反向提示词组合"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
+                  <button class="icon-btn" type="button" data-prompt-action="paste" data-target="negativePrompt" title="粘贴提示词"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+                  <button class="icon-btn" type="button" data-prompt-action="clear" data-target="negativePrompt" title="清空提示词"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></button>
+                </div>
               </div>
               <textarea id="negativePrompt" spellcheck="false">lowres, bad anatomy, bad hands, missing fingers, extra digits, watermark, text</textarea>
             </div>
@@ -151,7 +151,7 @@
               </div>
               <div class="grid2 seed-row">
                 <label class="field-label">Seed
-                  <input id="seedInput" type="number" value="86203911">
+                  <span class="seed-input-row"><input id="seedInput" type="number" value="86203911"><button class="icon-btn" type="button" id="randomSeedBtn" title="随机生成 Seed"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="8" cy="8" r="1" fill="currentColor"/><circle cx="16" cy="8" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="8" cy="16" r="1" fill="currentColor"/><circle cx="16" cy="16" r="1" fill="currentColor"/></svg></button></span>
                 </label>
                 <label class="toggle-line"><input type="checkbox" id="randomSeed" checked> 随机种子</label>
               </div>
@@ -194,6 +194,12 @@
                   <button class="chip" data-style="哥特">哥特</button>
                   <button class="chip" data-style="未来主义">未来主义</button>
                 </div>
+                <div class="quick-tags" aria-label="常用画面提示词">
+                  <button class="chip">anime style</button>
+                  <button class="chip">detailed eyes</button>
+                  <button class="chip">soft lighting</button>
+                  <button class="chip">full body</button>
+                </div>
               </details>
             </div>
 
@@ -210,7 +216,7 @@
               <div class="card-head">
                 <h2>生成结果</h2>
                 <div class="toolbar">
-                  <button class="icon-btn" title="保存"><svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg></button>
+                  <button class="icon-btn" id="resultViewBtn" title="查看"><svg viewBox="0 0 24 24"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
                   <button class="icon-btn" title="复制提示词"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
                 </div>
               </div>
@@ -229,7 +235,7 @@
             </div>
 
             <div class="card">
-              <div class="card-head"><h2>最近生成</h2><a class="link" href="#">查看全部</a></div>
+              <div class="card-head"><h2>最近生成</h2><button class="link" type="button" id="viewAllRecent">查看全部</button></div>
               <div class="thumb-row" id="recentThumbs"></div>
             </div>
 
@@ -247,11 +253,12 @@
         <div class="page-toolbar">
           <div class="search-box">
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            <input type="search" placeholder="搜索图片、提示词、模型">
+            <input id="assetSearch" type="search" placeholder="搜索图片、提示词、模型">
           </div>
           <div class="toolbar-right">
-            <select><option>全部模型</option><option>Z-Image Turbo</option><option>Fluxed Up</option></select>
-            <button class="btn-secondary">导入图片</button>
+            <select id="assetModelFilter"><option value="">全部模型</option><option value="Z-Image Turbo">Z-Image Turbo</option><option value="Fluxed Up">Fluxed Up</option><option value="导入图片">导入图片</option></select>
+            <button class="btn-secondary" type="button" id="importImageBtn">导入图片</button>
+            <input id="importImageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
           </div>
         </div>
         <div class="asset-tabs">
@@ -275,10 +282,10 @@
         <div class="page-toolbar">
           <div class="search-box">
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            <input type="search" placeholder="搜索历史提示词">
+            <input id="historySearch" type="search" placeholder="搜索历史提示词">
           </div>
           <div class="toolbar-right">
-            <select><option>全部模型</option><option>Z-Image Turbo</option><option>Fluxed Up</option></select>
+            <select id="historyModelFilter"><option value="">全部模型</option><option value="Z-Image Turbo">Z-Image Turbo</option><option value="Fluxed Up">Fluxed Up</option></select>
             <button class="btn-secondary">清空记录</button>
           </div>
         </div>
@@ -289,20 +296,21 @@
         <div class="settings-grid">
           <div class="card">
             <h2>ComfyUI 连接</h2>
-            <label class="field-label">服务地址<input value="http://127.0.0.1:8188"></label>
-            <label class="field-label">API Key <input placeholder="留空表示无需认证"></label>
-            <button class="btn-secondary">测试连接</button>
+            <label class="field-label">服务地址<input id="comfyuiUrlInput" type="text" value="http://127.0.0.1:8188"></label>
+            <label class="field-label">API Key <input type="text" placeholder="留空表示无需认证"></label>
+            <button class="btn-secondary" type="button" id="testConnectionBtn">测试连接</button>
           </div>
           <div class="card">
             <h2>文件保存</h2>
-            <label class="field-label">图片输出目录<input value="E:\AI绘图\outputs"></label>
-            <label class="field-label">工作流目录<input value="D:\liulanqi"></label>
+            <label class="field-label">图片输出目录<span class="directory-input"><input id="outputDirInput" type="text" value="E:\AI绘图\outputs"><button class="btn-secondary" type="button" data-browse-directory="outputDirInput">选择目录</button></span></label>
+            <label class="field-label">工作流目录<span class="directory-input"><input id="workflowDirInput" type="text" value="D:\liulanqi"><button class="btn-secondary" type="button" data-browse-directory="workflowDirInput">选择目录</button></span></label>
+            <button class="btn-primary" type="button" id="saveSettingsBtn">保存设置</button>
           </div>
           <div class="card">
             <h2>模型档案</h2>
             <div class="profile-row"><span>Z-Image Turbo</span><span class="badge-soft">默认</span></div>
             <div class="profile-row"><span>Fluxed Up</span><span class="badge-soft">已识别</span></div>
-            <button class="btn-secondary">管理模型档案</button>
+            <button class="btn-secondary" type="button" id="manageModelsBtn">管理模型档案</button>
           </div>
         </div>
       </section>
